@@ -1,0 +1,88 @@
+#pragma kernel CSMain
+
+RWTexture2D<float4> MeshTexture;
+StructuredBuffer<float2> UVs;
+StructuredBuffer<int> Triangles;
+
+int Width;
+int Height;
+float4 LineColor;
+
+void DrawLine(uint2 p1, uint2 p2, float4 color)
+{
+    // Bresenhamのライン描画アルゴリズム（最適化版）
+    int x0 = (int)p1.x;
+    int y0 = (int)p1.y;
+    int x1 = (int)p2.x;
+    int y1 = (int)p2.y;
+    
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    
+    while (true)
+    {
+        // 範囲内チェックして描画
+        if (x0 >= 0 && x0 < Width && y0 >= 0 && y0 < Height)
+        {
+            MeshTexture[uint2(x0, y0)] = color;
+        }
+        
+        if (x0 == x1 && y0 == y1) break;
+        
+        int e2 = 2 * err;
+        if (e2 > -dy)
+        {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    int triangleIndex = (int)id.x;
+    
+    // 三角形インデックスの範囲チェック
+    int maxTriangles = 65536; // 安全な上限
+    if (triangleIndex >= maxTriangles) return;
+    
+    int baseIndex = triangleIndex * 3;
+    if (baseIndex + 2 >= 262144) return; // Triangles配列の安全な上限
+    
+    int p1Index = Triangles[baseIndex];
+    int p2Index = Triangles[baseIndex + 1];
+    int p3Index = Triangles[baseIndex + 2];
+    
+    // UVインデックスの範囲チェック
+    int maxUVs = 65536; // 安全な上限
+    if (p1Index >= maxUVs || p2Index >= maxUVs || p3Index >= maxUVs) return;
+    if (p1Index < 0 || p2Index < 0 || p3Index < 0) return;
+    
+    float2 uv1 = UVs[p1Index];
+    float2 uv2 = UVs[p2Index];
+    float2 uv3 = UVs[p3Index];
+    
+    // UV座標を正規化（0-1範囲に収める）
+    uv1 = frac(uv1);
+    uv2 = frac(uv2);
+    uv3 = frac(uv3);
+    
+    // UV座標を画面座標に変換
+    uint2 p1Pos = uint2(uv1.x * (Width - 1), uv1.y * (Height - 1));
+    uint2 p2Pos = uint2(uv2.x * (Width - 1), uv2.y * (Height - 1));
+    uint2 p3Pos = uint2(uv3.x * (Width - 1), uv3.y * (Height - 1));
+    
+    // 三角形の3つの辺を描画
+    DrawLine(p1Pos, p2Pos, LineColor);
+    DrawLine(p2Pos, p3Pos, LineColor);
+    DrawLine(p3Pos, p1Pos, LineColor);
+}
