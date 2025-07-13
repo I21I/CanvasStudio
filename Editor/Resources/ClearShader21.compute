@@ -1,0 +1,25 @@
+#pragma kernel ClearWithMask
+
+RWTexture2D<float4> TargetTexture;
+RWTexture2D<float4> OriginalTexture;
+RWTexture2D<float4> MaskTexture;
+
+int TextureWidth;
+int TextureHeight;
+
+[numthreads(8, 8, 1)]
+void ClearWithMask(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = MaskTexture[coord];
+    
+    // マスクされた部分を元のテクスチャに戻す
+    if (maskValue.a > 0.001)
+    {
+        float4 originalColor = OriginalTexture[coord];
+        TargetTexture[coord] = originalColor;
+    }
+}
