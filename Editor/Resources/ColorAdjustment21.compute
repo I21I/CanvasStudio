@@ -1,0 +1,149 @@
+// ColorAdjustment21.compute - 適用度削除版
+#pragma kernel ColorAdjustmentPreview
+#pragma kernel ApplyColorAdjustment
+
+// プレビュー用テクスチャ
+RWTexture2D<float4> PreviewTexture;
+RWTexture2D<float4> PaintMask;
+RWTexture2D<float4> OriginalTexture;
+RWTexture2D<float4> ColorAdjustedTexture;
+
+// 色調補正用テクスチャ
+RWTexture2D<float4> InputTexture;
+RWTexture2D<float4> OutputTexture;
+
+// パラメータ（Intensity削除）
+float Hue;
+float Saturation;
+float Brightness;
+float Gamma;
+int TextureWidth;
+int TextureHeight;
+int PreviewMode;
+
+// liltoon準拠のHSV変換関数
+float3 rgb2hsv_liltoon(float3 c)
+{
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    
+    float h = abs(q.z + (q.w - q.y) / (6.0 * d + e));
+    float s = d / (q.x + e);
+    float v = q.x;
+    
+    return float3(h, s, v);
+}
+
+float3 hsv2rgb_liltoon(float3 c)
+{
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * lerp(K.xxx, saturate(p - K.xxx), c.y);
+}
+
+// liltoon準拠の色調補正関数
+float3 ApplyColorCorrection_Liltoon(float3 color, float hue, float saturation, float brightness, float gamma)
+{
+    // 1. 最初にガンマ補正を適用（liltoon準拠）
+    float clampedGamma = clamp(gamma, 0.01, 2.0);
+    float3 result = pow(saturate(color), clampedGamma);
+    
+    // 2. HSV変換して色相・彩度を適用
+    float3 hsv = rgb2hsv_liltoon(result);
+    
+    // 色相調整（-0.5～0.5の範囲で回転）
+    hsv.x = frac(hsv.x + hue);
+    
+    // 彩度調整（0～2の範囲で倍率）
+    hsv.y = saturate(hsv.y * saturation);
+    
+    // RGB に戻す
+    result = hsv2rgb_liltoon(hsv);
+    
+    // 3. 最後に明度（Brightness）を適用
+    result = result * brightness;
+    
+    return saturate(result);
+}
+
+// カーネル0: ColorAdjustmentPreview
+[numthreads(8, 8, 1)]
+void ColorAdjustmentPreview(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = id.xy;
+    float4 maskColor = PaintMask[coord];
+    float4 originalColor = OriginalTexture[coord];
+    bool isSelected = maskColor.a > 0.001;
+    
+    if (PreviewMode == 1)
+    {
+        // 選択ペン表示モード
+        if (isSelected)
+        {
+            float3 selectionColor = float3(0.4, 0.4, 1.0);
+            float3 blendedColor = lerp(originalColor.rgb, selectionColor, 0.6);
+            PreviewTexture[coord] = float4(blendedColor, originalColor.a);
+        }
+        else
+        {
+            PreviewTexture[coord] = originalColor;
+        }
+    }
+    else if (PreviewMode == 2)
+    {
+        // 色調補正プレビューモード
+        if (isSelected)
+        {
+            // 色調補正をプレビューに適用
+            float3 adjustedColor = ApplyColorCorrection_Liltoon(
+                originalColor.rgb, Hue, Saturation, Brightness, Gamma);
+            PreviewTexture[coord] = float4(adjustedColor, originalColor.a);
+        }
+        else
+        {
+            PreviewTexture[coord] = originalColor;
+        }
+    }
+    else if (PreviewMode == 3)
+    {
+        // 色調補正＋透明化モード
+        if (isSelected)
+        {
+            float3 adjustedColor = ApplyColorCorrection_Liltoon(
+                originalColor.rgb, Hue, Saturation, Brightness, Gamma);
+            PreviewTexture[coord] = float4(adjustedColor, originalColor.a);
+        }
+        else
+        {
+            PreviewTexture[coord] = float4(originalColor.rgb, 0.0);
+        }
+    }
+    else
+    {
+        PreviewTexture[coord] = originalColor;
+    }
+}
+
+// カーネル1: ApplyColorAdjustment（適用度削除版）
+[numthreads(8, 8, 1)]
+void ApplyColorAdjustment(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = id.xy;
+    float4 inputColor = InputTexture[coord];
+    
+    // liltoon準拠の色調補正を適用
+    float3 adjustedColor = ApplyColorCorrection_Liltoon(
+        inputColor.rgb, Hue, Saturation, Brightness, Gamma);
+    
+    OutputTexture[coord] = float4(adjustedColor, inputColor.a);
+}
