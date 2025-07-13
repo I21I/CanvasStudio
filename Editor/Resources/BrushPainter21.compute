@@ -1,0 +1,281 @@
+#pragma kernel PaintBrush
+#pragma kernel SelectionPaintOptimized
+#pragma kernel SelectionErase
+#pragma kernel ClearWithMask
+#pragma kernel RestorePaintedAreas
+#pragma kernel ApplyColorAdjustmentToNonPaintedAreas
+#pragma kernel ApplyColorAdjustmentToPaintedAreas
+#pragma kernel ApplyPaintOpacity
+
+RWTexture2D<float4> WorkingTexture;
+RWTexture2D<float4> PaintMask;
+RWTexture2D<float4> OriginalTexture;
+RWTexture2D<float4> AdjustedTexture;
+RWTexture2D<float4> PaintColorTexture;
+
+// 選択ペン専用
+RWTexture2D<float4> SelectionMask;
+float2 SelectionBrushCenter;
+float SelectionBrushRadius;
+float SelectionBrushStrength;
+int SelectionSymmetricalPaint;
+float SelectionSymmetryAxisPosition;
+
+float2 BrushCenter;
+float BrushRadius;
+float BrushStrength;
+float4 PaintColor;
+float4 OriginalPaintColor;
+int BrushMode;
+int EraseMode;
+int SymmetricalPaint;
+float SymmetryAxisPosition;
+int TextureWidth;
+int TextureHeight;
+
+// 描画不透明度用パラメータ
+float PaintOpacity;
+
+// 強度ベースのアルファブレンディング関数
+float4 StrengthBasedBlend(float4 srcColor, float strength, float4 dstColor)
+{
+    float4 src = float4(srcColor.rgb, strength);
+    float outAlpha = src.a + dstColor.a * (1.0 - src.a);
+    
+    if (outAlpha <= 0.001)
+    {
+        return float4(0, 0, 0, 0);
+    }
+    
+    float3 outRGB = (src.rgb * src.a + dstColor.rgb * dstColor.a * (1.0 - src.a)) / outAlpha;
+    
+    return float4(outRGB, outAlpha);
+}
+
+[numthreads(8, 8, 1)]
+void PaintBrush(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    float2 pixelPos = float2(id.x, id.y);
+    float2 delta = pixelPos - BrushCenter;
+    float distance = length(delta);
+    
+    if (distance <= BrushRadius)
+    {
+        uint2 coord = uint2(id.x, id.y);
+        
+        if (EraseMode == 1)
+        {
+            float4 originalColor = OriginalTexture[coord];
+            WorkingTexture[coord] = originalColor;
+            PaintMask[coord] = float4(0, 0, 0, 0);
+            PaintColorTexture[coord] = float4(0, 0, 0, 0);
+        }
+        else
+        {
+            float4 existingMask = PaintMask[coord];
+            
+            if (existingMask.a >= BrushStrength)
+            {
+                return;
+            }
+            
+            float4 originalColor = OriginalTexture[coord];
+            float4 blendedColor = StrengthBasedBlend(PaintColor, BrushStrength, originalColor);
+            
+            WorkingTexture[coord] = blendedColor;
+            PaintMask[coord] = float4(1, 1, 1, BrushStrength);
+            PaintColorTexture[coord] = OriginalPaintColor;
+            
+            if (SymmetricalPaint == 1)
+            {
+                float axisX = SymmetryAxisPosition * (float)(TextureWidth - 1);
+                float mirrorX = axisX + (axisX - (float)id.x);
+                int mirrorXInt = (int)(mirrorX + 0.5);
+                
+                if (mirrorXInt >= 0 && mirrorXInt < TextureWidth)
+                {
+                    uint2 mirrorCoord = uint2((uint)mirrorXInt, id.y);
+                    float4 mirrorExistingMask = PaintMask[mirrorCoord];
+                    
+                    if (mirrorExistingMask.a >= BrushStrength)
+                    {
+                        return;
+                    }
+                    
+                    float4 mirrorOriginalColor = OriginalTexture[mirrorCoord];
+                    float4 mirrorBlended = StrengthBasedBlend(PaintColor, BrushStrength, mirrorOriginalColor);
+                    WorkingTexture[mirrorCoord] = mirrorBlended;
+                    PaintMask[mirrorCoord] = float4(1, 1, 1, BrushStrength);
+                    PaintColorTexture[mirrorCoord] = OriginalPaintColor;
+                }
+            }
+        }
+    }
+}
+
+[numthreads(8, 8, 1)]
+void SelectionPaintOptimized(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    float2 pixelPos = float2(id.x, id.y);
+    float2 delta = pixelPos - SelectionBrushCenter;
+    float distance = length(delta);
+    
+    if (distance <= SelectionBrushRadius)
+    {
+        uint2 coord = uint2(id.x, id.y);
+        float4 existingMask = SelectionMask[coord];
+        
+        if (existingMask.a >= SelectionBrushStrength)
+        {
+            return;
+        }
+        
+        SelectionMask[coord] = float4(1, 1, 1, SelectionBrushStrength);
+        
+        if (SelectionSymmetricalPaint == 1)
+        {
+            float axisX = SelectionSymmetryAxisPosition * (float)(TextureWidth - 1);
+            float mirrorX = axisX + (axisX - (float)id.x);
+            int mirrorXInt = (int)(mirrorX + 0.5);
+            
+            if (mirrorXInt >= 0 && mirrorXInt < TextureWidth)
+            {
+                uint2 mirrorCoord = uint2((uint)mirrorXInt, id.y);
+                float4 mirrorExistingMask = SelectionMask[mirrorCoord];
+                
+                if (mirrorExistingMask.a >= SelectionBrushStrength)
+                {
+                    return;
+                }
+                
+                SelectionMask[mirrorCoord] = float4(1, 1, 1, SelectionBrushStrength);
+            }
+        }
+    }
+}
+
+[numthreads(8, 8, 1)]
+void SelectionErase(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    float2 pixelPos = float2(id.x, id.y);
+    float2 delta = pixelPos - SelectionBrushCenter;
+    float distance = length(delta);
+    
+    if (distance <= SelectionBrushRadius)
+    {
+        uint2 coord = uint2(id.x, id.y);
+        SelectionMask[coord] = float4(0, 0, 0, 0);
+        
+        if (SelectionSymmetricalPaint == 1)
+        {
+            float axisX = SelectionSymmetryAxisPosition * (float)(TextureWidth - 1);
+            float mirrorX = axisX + (axisX - (float)id.x);
+            int mirrorXInt = (int)(mirrorX + 0.5);
+            
+            if (mirrorXInt >= 0 && mirrorXInt < TextureWidth)
+            {
+                uint2 mirrorCoord = uint2((uint)mirrorXInt, id.y);
+                SelectionMask[mirrorCoord] = float4(0, 0, 0, 0);
+            }
+        }
+    }
+}
+
+[numthreads(8, 8, 1)]
+void ClearWithMask(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = PaintMask[coord];
+    
+    if (maskValue.a > 0.001)
+    {
+        float4 originalColor = OriginalTexture[coord];
+        WorkingTexture[coord] = originalColor;
+        PaintMask[coord] = float4(0, 0, 0, 0);
+        PaintColorTexture[coord] = float4(0, 0, 0, 0);
+    }
+}
+
+[numthreads(8, 8, 1)]
+void RestorePaintedAreas(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = PaintMask[coord];
+    
+    if (maskValue.a > 0.001)
+    {
+        float4 paintedColor = WorkingTexture[coord];
+        WorkingTexture[coord] = paintedColor;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void ApplyColorAdjustmentToNonPaintedAreas(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = PaintMask[coord];
+    
+    if (maskValue.a <= 0.001)
+    {
+        float4 adjustedColor = AdjustedTexture[coord];
+        WorkingTexture[coord] = adjustedColor;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void ApplyColorAdjustmentToPaintedAreas(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = PaintMask[coord];
+    
+    if (maskValue.a > 0.001)
+    {
+        float4 adjustedColor = AdjustedTexture[coord];
+        float4 originalColor = OriginalTexture[coord];
+        WorkingTexture[coord] = lerp(originalColor, adjustedColor, maskValue.a);
+    }
+}
+
+// 新規追加：描画不透明度適用カーネル
+[numthreads(8, 8, 1)]
+void ApplyPaintOpacity(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)TextureWidth || id.y >= (uint)TextureHeight)
+        return;
+    
+    uint2 coord = uint2(id.x, id.y);
+    float4 maskValue = PaintMask[coord];
+    
+    if (maskValue.a > 0.001)
+    {
+        float4 originalColor = OriginalTexture[coord];
+        float4 adjustedPaintColor = AdjustedTexture[coord];
+        
+        // 描画不透明度を適用した効果的なアルファ値を計算
+        float effectiveAlpha = maskValue.a * PaintOpacity;
+        
+        // 元のテクスチャと描画色をブレンド
+        WorkingTexture[coord] = StrengthBasedBlend(adjustedPaintColor, effectiveAlpha, originalColor);
+    }
+}
