@@ -3,103 +3,107 @@ using UnityEditor;
 
 namespace CanvasStudio
 {
-    public partial class CanvasStudio : EditorWindow
+    public class CanvasStudio : EditorWindow
     {
-        [MenuItem("21CSX/Canvas Studio")]
+        [SerializeField] public CanvasStudioCore core;
+        [SerializeField] public UndoSystem undoSystem;
+        [SerializeField] public SelectionSystem selectionSystem;
+        [SerializeField] public ColorAdjustmentSystem colorAdjustmentSystem;
+        [SerializeField] public PaintSystem paintSystem;
+        [SerializeField] public TextureUtilities textureUtilities;
+        [SerializeField] public UIDrawer uiDrawer;
+        [SerializeField] public MeshDisplaySystem meshDisplaySystem;
+        [SerializeField] public EditorCallbacks editorCallbacks;
+        
+        [MenuItem("Window/Canvas Studio")]
         public static void ShowWindow()
         {
             CanvasStudio window = GetWindow<CanvasStudio>("Canvas Studio");
-            window.minSize = new Vector2(900, 700);
-            window.ResetAllState();
-            window.Initialize();
-            window.Focus();
+            window.minSize = new Vector2(800, 600);
+            window.Show();
         }
-
+        
+        void OnEnable()
+        {
+            // システム初期化
+            if (core == null) core = new CanvasStudioCore();
+            core.Initialize();
+            
+            if (undoSystem == null) undoSystem = new UndoSystem(this);
+            if (selectionSystem == null) selectionSystem = new SelectionSystem(this);
+            if (colorAdjustmentSystem == null) colorAdjustmentSystem = new ColorAdjustmentSystem(this);
+            if (paintSystem == null) paintSystem = new PaintSystem(this);
+            if (textureUtilities == null) textureUtilities = new TextureUtilities(this);
+            if (uiDrawer == null) uiDrawer = new UIDrawer(this);
+            if (meshDisplaySystem == null) meshDisplaySystem = new MeshDisplaySystem(this);
+            if (editorCallbacks == null) editorCallbacks = new EditorCallbacks(this);
+            
+            editorCallbacks.OnEnable();
+            
+            // カーソルテクスチャ初期化
+            try
+            {
+                textureUtilities.CreateBrushCursor();
+                textureUtilities.CreateBucketCursor();
+                textureUtilities.CreateCheckerboardTexture();
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"CanvasStudio: カーソルテクスチャ初期化警告: {e.Message}");
+            }
+        }
+        
+        void OnDisable()
+        {
+            editorCallbacks?.OnDisable();
+        }
+        
+        void OnDestroy()
+        {
+            editorCallbacks?.OnDestroy();
+        }
+        
         void OnGUI()
         {
-            // リアルタイム更新処理
-            ProcessRealTimeUpdates();
-            
-            EditorGUILayout.BeginHorizontal();
-            
-            DrawLeftPanel();
-            
-            EditorGUILayout.BeginVertical(GUILayout.Width(2));
-            GUILayout.Box("", GUILayout.Width(2), GUILayout.ExpandHeight(true));
-            EditorGUILayout.EndVertical();
-            
-            DrawRightPanel();
-            
-            EditorGUILayout.EndHorizontal();
-            
-            // ズーム情報と倍率リセットボタンを右上に直接描画
-            DrawZoomInfoOverlay();
-            
-            HandleKeyboardInput();
-        }
-
-        void Initialize()
-        {
-            InitializeComputeShaders();
-            CreateCheckerboardTexture();
+            if (core == null || uiDrawer == null)
+            {
+                EditorGUILayout.LabelField("Canvas Studio 初期化中...", EditorStyles.centeredGreyMiniLabel);
+                return;
+            }
             
             try
             {
-                CreateBrushCursor();
-                CreateBucketCursor();
+                uiDrawer.OnGUI();
             }
-            catch (System.Exception)
+            catch (System.Exception e)
             {
-                Debug.LogError("Canvas Studio: カーソルテクスチャ初期化エラー");
+                EditorGUILayout.HelpBox($"Canvas Studio エラー: {e.Message}", MessageType.Error);
+                Debug.LogError($"CanvasStudio OnGUI エラー: {e.Message}\n{e.StackTrace}");
             }
         }
-
-        void HandleKeyboardInput()
+        
+        void OnSelectionChange()
         {
-            Event e = Event.current;
-            
-            if (e.type == EventType.KeyDown)
-            {
-                bool isToolFocused = EditorWindow.focusedWindow == this;
-                
-                if (e.control && e.keyCode == KeyCode.Z)
-                {
-                    if (isToolFocused && workingTexture != null)
-                    {
-                        PerformUnifiedUndo();
-                        e.Use();
-                    }
-                }
-                else if (e.control && e.keyCode == KeyCode.Y)
-                {
-                    if (isToolFocused && workingTexture != null)
-                    {
-                        PerformUnifiedRedo();
-                        e.Use();
-                    }
-                }
-            }
+            editorCallbacks?.OnSelectionChange();
         }
-
-        void DrawZoomInfoOverlay()
+        
+        void OnFocus()
         {
-            // ウィンドウの右上に直接描画（レイアウト制約を無視）
-            float windowWidth = position.width;
-            float rightMargin = 10f;
-            float topMargin = 2f;
-            
-            // 倍率リセットボタン（右端）
-            Rect buttonRect = new Rect(windowWidth - 80 - rightMargin, topMargin, 80, 20);
-            if (GUI.Button(buttonRect, "倍率リセット"))
+            editorCallbacks?.OnFocus();
+        }
+        
+        void OnLostFocus()
+        {
+            editorCallbacks?.OnLostFocus();
+        }
+        
+        void Update()
+        {
+            // アニメーションやリアルタイム更新が必要な場合
+            if (core?.workingTexture != null)
             {
-                uvZoom = 1f;
-                uvPanOffset = Vector2.zero;
-                meshTextureDirty = true;
+                Repaint();
             }
-            
-            // ズーム情報（ボタンの左）
-            Rect zoomRect = new Rect(windowWidth - 160 - rightMargin, topMargin + 2, 75, 18);
-            GUI.Label(zoomRect, $"ズーム: {uvZoom:F2}x", EditorStyles.miniLabel);
         }
     }
 }
