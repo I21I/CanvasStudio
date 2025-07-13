@@ -1,497 +1,197 @@
 using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
-using System.IO;
-using Unity.Profiling;
 
 namespace CanvasStudio
 {
-    // 統一Undo用の操作タイプ
-    public enum UnifiedUndoType
+    public class CanvasStudioCore
     {
-        TextureOperation,      // テクスチャ操作（ブラシ、色調補正など）
-        ParameterOperation     // パラメータ操作（スライダーなど）
-    }
-
-    // 統一Undo用の操作記録
-    [System.Serializable]
-    public class UnifiedUndoRecord
-    {
-        public UnifiedUndoType operationType;
-        public string operationName;
-        public UnifiedUndoState undoState;
-        public System.DateTime timestamp;
-    }
-
-    // 統一Undo用のデータクラス
-    [System.Serializable]
-    public class UnifiedUndoState
-    {
-        // テクスチャ状態
+        // 基本的なターゲット管理
+        public GameObject targetObject;
+        public Renderer targetRenderer;
+        public Material targetMaterial;
+        public Material originalMaterial;
+        public int materialIndex = 0;
+        
+        // テクスチャ直接編集用
+        public Texture2D directTexture;
+        public bool isDirectTextureMode = false;
+        
+        // レンダーテクスチャ
+        public Texture2D originalTexture;
         public RenderTexture workingTexture;
         public RenderTexture paintMask;
-        public RenderTexture selectionMask;
         public RenderTexture originalTextureRT;
         public RenderTexture paintColorTexture;
         
-        // パラメータ状態
-        public float hue, saturation, brightness, gamma;
-        public float globalHue, globalSaturation, globalBrightness, globalGamma;
-        public float paintedAreaHue, paintedAreaSaturation, paintedAreaBrightness, paintedAreaGamma;
-        public float symmetryAxis;
-        public float brushStrength;
-        public float paintOpacity;
-        public bool wasSelectionMode;
-        public bool wasShowingSelection;
-        public string operationName;
-        
-        // ターゲット情報
-        public GameObject savedTargetObject;
-        public Material savedTargetMaterial;
-        public Texture2D savedDirectTexture;
-        public Texture2D savedOriginalTexture;
-        public bool savedIsDirectTextureMode;
-        public int savedMaterialIndex;
-        
-        public void Release()
-        {
-            if (workingTexture != null) { workingTexture.Release(); workingTexture = null; }
-            if (paintMask != null) { paintMask.Release(); paintMask = null; }
-            if (selectionMask != null) { selectionMask.Release(); selectionMask = null; }
-            if (originalTextureRT != null) { originalTextureRT.Release(); originalTextureRT = null; }
-            if (paintColorTexture != null) { paintColorTexture.Release(); paintColorTexture = null; }
-        }
-        
-        public UnifiedUndoState DeepCopy()
-        {
-            UnifiedUndoState copy = new UnifiedUndoState();
-            copy.operationName = operationName;
-            copy.hue = hue;
-            copy.saturation = saturation;
-            copy.brightness = brightness;
-            copy.gamma = gamma;
-            copy.globalHue = globalHue;
-            copy.globalSaturation = globalSaturation;
-            copy.globalBrightness = globalBrightness;
-            copy.globalGamma = globalGamma;
-            copy.paintedAreaHue = paintedAreaHue;
-            copy.paintedAreaSaturation = paintedAreaSaturation;
-            copy.paintedAreaBrightness = paintedAreaBrightness;
-            copy.paintedAreaGamma = paintedAreaGamma;
-            copy.symmetryAxis = symmetryAxis;
-            copy.brushStrength = brushStrength;
-            copy.paintOpacity = paintOpacity;
-            copy.wasSelectionMode = wasSelectionMode;
-            copy.wasShowingSelection = wasShowingSelection;
-            
-            // ターゲット情報のコピー
-            copy.savedTargetObject = savedTargetObject;
-            copy.savedTargetMaterial = savedTargetMaterial;
-            copy.savedDirectTexture = savedDirectTexture;
-            copy.savedOriginalTexture = savedOriginalTexture;
-            copy.savedIsDirectTextureMode = savedIsDirectTextureMode;
-            copy.savedMaterialIndex = savedMaterialIndex;
-            
-            return copy;
-        }
-    }
-
-    public partial class CanvasStudio : EditorWindow
-    {
-        // 基本的なターゲット管理
-        protected GameObject targetObject;
-        protected Renderer targetRenderer;
-        protected Material targetMaterial;
-        protected Material originalMaterial;
-        protected int materialIndex = 0;
-        
-        // テクスチャ直接編集用
-        protected Texture2D directTexture;
-        protected bool isDirectTextureMode = false;
-        
-        protected Texture2D originalTexture;
-        protected RenderTexture workingTexture;
-        protected RenderTexture paintMask;
-        protected RenderTexture originalTextureRT;
-        protected RenderTexture paintColorTexture;
-        
-        // 色調補正システム
-        [SerializeField] protected bool selectionPenMode = false;
-        protected ComputeShader colorAdjustmentCS;
-        protected RenderTexture selectionPreviewTexture;
-        protected RenderTexture colorAdjustedTexture;
-        [SerializeField] protected bool isShowingSelectionPen = true;
-        
-        // 選択ペンモード用
-        protected RenderTexture normalModeMask;
-        protected RenderTexture normalModeTexture;
-        protected RenderTexture selectionMask;
-        [SerializeField] protected Texture2D backupTexture;
-        [SerializeField] protected Texture2D persistentSelectionMask;
-        
-        // 描画部分色調補正パラメータ
-        [SerializeField] protected float paintedAreaColorHue = 0f;
-        [SerializeField] protected float paintedAreaColorSaturation = 1f;
-        [SerializeField] protected float paintedAreaColorBrightness = 1f;
-        [SerializeField] protected float paintedAreaColorGamma = 1f;
-
-        // 参照テクスチャ色調補正パラメータ
-        [SerializeField] protected float globalColorHue = 0f;
-        [SerializeField] protected float globalColorSaturation = 1f;
-        [SerializeField] protected float globalColorBrightness = 1f;
-        [SerializeField] protected float globalColorGamma = 1f;
-
-        // 色調補正パラメータ
-        [SerializeField] protected float colorHue = 0f;
-        [SerializeField] protected float colorSaturation = 1f;
-        [SerializeField] protected float colorBrightness = 1f;
-        [SerializeField] protected float colorGamma = 1f;
-        
-        // 最適化用フラグ
-        protected bool needsColorUpdate = false;
-        protected bool needsGlobalUpdate = false;
-        protected bool needsPaintedAreaUpdate = false;
-        protected bool isProcessingGlobalColorAdjustment = false;
-        protected bool needsPaintOpacityUpdate = false;
-        
-        // GPU ブラシ関連
-        protected ComputeShader brushPainterCS;
-        protected ComputeShader clearShaderCS;
-        protected bool useGPUBrush = false;
-        protected bool computeShaderVerified = false;
+        // ComputeShader
+        public ComputeShader colorAdjustmentCS;
+        public ComputeShader brushPainterCS;
+        public ComputeShader clearShaderCS;
+        public ComputeShader meshGeneratorCS;
         
         // ペイント設定
-        protected Color paintColor = Color.red;
-        protected float brushSize = 20f;
-        protected float brushStrength = 1f;
-        protected float paintOpacity = 1f;
-        protected bool eraseMode = false;  
-        protected bool symmetricalPaint = false;
-        protected bool useBucketTool = false;
+        public Color paintColor = Color.red;
+        public float brushSize = 20f;
+        public float brushStrength = 1f;
+        public float paintOpacity = 1f;
+        public bool eraseMode = false;
+        public bool symmetricalPaint = false;
+        public bool useBucketTool = false;
         
         // 対称軸設定
-        protected float symmetryAxisPosition = 0.5f;
-        protected bool symmetryAxisLocked = true;
-        protected bool isDraggingSymmetryAxis = false;
+        public float symmetryAxisPosition = 0.5f;
+        public bool symmetryAxisLocked = true;
+        public bool isDraggingSymmetryAxis = false;
         
-        // スライダードラッグ状態の管理
-        protected bool isDraggingGlobalHue = false;
-        protected bool isDraggingGlobalSaturation = false;
-        protected bool isDraggingGlobalBrightness = false;
-        protected bool isDraggingGlobalGamma = false;
-        protected bool isDraggingSelectionHue = false;
-        protected bool isDraggingSelectionSaturation = false;
-        protected bool isDraggingSelectionBrightness = false;
-        protected bool isDraggingSelectionGamma = false;
-        protected bool isDraggingPaintedAreaHue = false;
-        protected bool isDraggingPaintedAreaSaturation = false;
-        protected bool isDraggingPaintedAreaBrightness = false;
-        protected bool isDraggingPaintedAreaGamma = false;
-        protected bool isDraggingBrushSize = false;
-        protected bool isDraggingBrushStrength = false;
-        protected bool isDraggingPaintOpacity = false;
+        // 色調補正パラメータ
+        public float paintedAreaColorHue = 0f;
+        public float paintedAreaColorSaturation = 1f;
+        public float paintedAreaColorBrightness = 1f;
+        public float paintedAreaColorGamma = 1f;
         
-        // 統一Undoシステム
-        protected List<UnifiedUndoRecord> undoStack = new List<UnifiedUndoRecord>();
-        protected List<UnifiedUndoRecord> redoStack = new List<UnifiedUndoRecord>();
-        protected const int maxUndoSteps = 50;
-        protected bool isRestoringFromUndo = false;
+        public float globalColorHue = 0f;
+        public float globalColorSaturation = 1f;
+        public float globalColorBrightness = 1f;
+        public float globalColorGamma = 1f;
+        
+        public float colorHue = 0f;
+        public float colorSaturation = 1f;
+        public float colorBrightness = 1f;
+        public float colorGamma = 1f;
+        
+        // UI状態
+        public bool showPaintSettings = true;
+        public bool showColorSettings = true;
+        public bool showColorAdjustmentSettings = true;
+        public bool showSelectionColorAdjustmentSettings = true;
+        public bool showUVMesh = true;
+        public bool showPaintedAreaColorAdjustment = true;
+        public bool showReferenceColorAdjustment = false;
+        public bool showCombinedColorAdjustment = false;
         
         // バケツツール設定
-        protected int bucketMode = 1;
-        protected float bucketThreshold = 0.5f;
+        public int bucketMode = 1;
+        public float bucketThreshold = 0.5f;
         
         // エクスポート設定
-        protected bool exportFullTexture = false;
-        protected int backgroundMode = 0;
+        public bool exportFullTexture = false;
+        public int backgroundMode = 0;
+        public Color customBackgroundColor = new Color(1f, 1f, 1f, 0f);
+        public Color customMeshColor = Color.black;
+        public bool autoSetAfterApply = true;
         
-        // マテリアル復元用
-        protected Dictionary<Material, Dictionary<string, Texture>> originalShaderTextures = new Dictionary<Material, Dictionary<string, Texture>>();
-        protected bool isPreviewActive = false;
-        protected bool preventTextureRestore = false;
-        protected bool needsMaterialRestore = false;
-        
-        // 表示ボタン押下時の自動選択を防ぐフラグ
-        protected bool ignoreSelectionChange = false;
-        protected float ignoreSelectionChangeUntil = 0f;
-        protected float lastShowButtonTime = 0f;
-        protected const float SHOW_BUTTON_COOLDOWN = 0.1f;
-        
-        // プロファイラーマーカー
-        protected static readonly ProfilerMarker s_BrushPaintMarker = new ProfilerMarker("CanvasStudio.BrushPaint");
-        protected static readonly ProfilerMarker s_ComputeDispatchMarker = new ProfilerMarker("CanvasStudio.ComputeDispatch");
-        protected static readonly ProfilerMarker s_TextureUpdateMarker = new ProfilerMarker("CanvasStudio.TextureUpdate");
-        
-        // UI関連
-        protected Vector2 leftScrollPosition;
-        protected Vector2 rightScrollPosition;
-        protected bool isPainting = false;
-        protected bool showPaintSettings = true;
-        protected bool showColorSettings = true;
-        protected bool showColorAdjustmentSettings = true;
-        protected bool showSelectionColorAdjustmentSettings = true;
-        protected bool showUVMesh = true;
-
-        protected Color customBackgroundColor = new Color(1f, 1f, 1f, 0f);
-        protected Color customMeshColor = Color.black;
-        protected bool autoSetAfterApply = true;
-        
-        // 色調補正サブタブの状態
-        protected bool showPaintedAreaColorAdjustment = true;
-        protected bool showReferenceColorAdjustment = false;
-        protected bool showCombinedColorAdjustment = false;
-        
-        // レイアウト定数
-        protected const float leftPanelWidth = 350f;
-        protected const float operationAreaHeight = 75f;
+        // GPU設定
+        public bool useGPUBrush = false;
+        public bool computeShaderVerified = false;
         
         // UV表示関連
-        protected float uvZoom = 1f;
-        protected Vector2 uvPanOffset = Vector2.zero;
-        protected const float baseUVSize = 540f;
-        protected const float minZoom = 0.1f;
-        protected const float maxZoom = 10f;
-        protected bool isDraggingUV = false;
-        protected Vector2 lastMousePosition;
-        protected Vector2 lastPaintPosition;
-        protected bool hasLastPaintPosition = false;
-        protected Vector2 straightLineStart;
-        protected bool isDrawingStraightLine = false;
+        public float uvZoom = 1f;
+        public Vector2 uvPanOffset = Vector2.zero;
+        public const float baseUVSize = 540f;
+        public const float minZoom = 0.1f;
+        public const float maxZoom = 10f;
+        public bool isDraggingUV = false;
+        public Vector2 lastMousePosition;
         
-        // カーソル
-        protected Texture2D brushCursorTexture;
-        protected Texture2D bucketCursorTexture;
-        protected Rect lastPreviewRect;
+        // ペイント状態
+        public bool isPainting = false;
+        public Vector2 lastPaintPosition;
+        public bool hasLastPaintPosition = false;
+        public Vector2 straightLineStart;
+        public bool isDrawingStraightLine = false;
+        public bool isCurrentlyPainting = false;
+        public HashSet<Vector2Int> strokePaintedPixels = new HashSet<Vector2Int>();
+        
+        // カーソルテクスチャ
+        public Texture2D brushCursorTexture;
+        public Texture2D bucketCursorTexture;
+        public Texture2D checkerboardTexture;
         
         // メッシュ表示
-        protected ComputeShader meshGeneratorCS;
-        protected RenderTexture meshTexture;
-        protected bool meshTextureDirty = true;
-        protected GameObject lastMeshCachedObject;
+        public RenderTexture meshTexture;
+        public bool meshTextureDirty = true;
+        public GameObject lastMeshCachedObject;
+        
+        // スクロール位置
+        public Vector2 leftScrollPosition;
+        public Vector2 rightScrollPosition;
+        
+        // フラグ
+        public bool isSpoidMode = false;
+        public bool preventTextureRestore = false;
+        public bool needsMaterialRestore = false;
+        public bool isPreviewActive = false;
         
         // 定数
-        protected const float PAINT_MASK_THRESHOLD = 0.001f;
-        protected static readonly Color SELECTION_PEN_COLOR = new Color(0.4f, 0.4f, 1.0f, 0.6f);
+        public const float leftPanelWidth = 350f;
+        public const float operationAreaHeight = 75f;
+        public const float PAINT_MASK_THRESHOLD = 0.001f;
+        public static readonly Color SELECTION_PEN_COLOR = new Color(0.4f, 0.4f, 1.0f, 0.6f);
         
-        // その他のモード・状態
-        protected bool isSpoidMode = false;
-        protected bool hasSelectionArea = false;
-        protected HashSet<Vector2Int> strokePaintedPixels = new HashSet<Vector2Int>();
-        protected bool isCurrentlyPainting = false;
-        protected Texture2D checkerboardTexture;
+        // マテリアル復元用
+        public Dictionary<Material, Dictionary<string, Texture>> originalShaderTextures = new Dictionary<Material, Dictionary<string, Texture>>();
         
-        // シェーダー対応の定数
-        protected static readonly string[] POIYOMI_TEXTURE_PROPERTIES = {
+        // シェーダー対応
+        public static readonly string[] POIYOMI_TEXTURE_PROPERTIES = {
             "_MainTex", "_BaseMap", "_AlbedoMap", "_DiffuseMap", "_ColorMap", "_BaseColorMap"
         };
         
-        protected static readonly string[] LILTOON_TEXTURE_PROPERTIES = {
+        public static readonly string[] LILTOON_TEXTURE_PROPERTIES = {
             "_MainTex", "_BaseMap", "_BaseColorMap"
         };
         
-        protected static readonly string[] UNITY_STANDARD_TEXTURE_PROPERTIES = {
+        public static readonly string[] UNITY_STANDARD_TEXTURE_PROPERTIES = {
             "_MainTex", "_BaseMap", "_BaseColorMap", "_AlbedoMap"
         };
         
-        protected static readonly string[] VRCHAT_TEXTURE_PROPERTIES = {
+        public static readonly string[] VRCHAT_TEXTURE_PROPERTIES = {
             "_MainTex", "_Diffuse", "_DiffuseTexture", "_Albedo"
         };
-
-        void ResetAllState()
+        
+        // 初期化
+        public void Initialize()
+        {
+            InitializeComputeShaders();
+        }
+        
+        void InitializeComputeShaders()
         {
             try
             {
-                // 前の状態を完全にクリーンアップ
-                if (targetObject != null || targetRenderer != null || targetMaterial != null || isDirectTextureMode)
+                brushPainterCS = Resources.Load<ComputeShader>("BrushPainter21");
+                clearShaderCS = Resources.Load<ComputeShader>("ClearShader21");
+                
+                if (brushPainterCS != null && SystemInfo.supportsComputeShaders)
                 {
-                    RestoreAllMaterials();
-                }
-                
-                CleanupAllResources();
-                
-                // 全てのターゲット関連をクリア
-                targetObject = null;
-                targetRenderer = null;
-                targetMaterial = null;
-                originalMaterial = null;
-                originalTexture = null;
-                directTexture = null;
-                isDirectTextureMode = false;
-                materialIndex = 0;
-                
-                // 選択ペンモード関連をクリア
-                selectionPenMode = false;
-                isShowingSelectionPen = true;
-                hasSelectionArea = false;
-                
-                // 色調補正パラメータをリセット
-                colorHue = 0f;
-                colorSaturation = 1f;
-                colorBrightness = 1f;
-                colorGamma = 1f;
-                globalColorHue = 0f;
-                globalColorSaturation = 1f;
-                globalColorBrightness = 1f;
-                globalColorGamma = 1f;
-                paintedAreaColorHue = 0f;
-                paintedAreaColorSaturation = 1f;
-                paintedAreaColorBrightness = 1f;
-                paintedAreaColorGamma = 1f;
-                
-                // ペイント設定をリセット
-                paintColor = Color.red;
-                brushSize = 20f;
-                brushStrength = 1f;
-                paintOpacity = 1f;
-                eraseMode = false;
-                symmetricalPaint = false;
-                useBucketTool = false;
-                symmetryAxisPosition = 0.5f;
-                symmetryAxisLocked = true;
-                
-                // UI状態をリセット
-                uvZoom = 1f;
-                uvPanOffset = Vector2.zero;
-                showPaintSettings = true;
-                showColorSettings = true;
-                showColorAdjustmentSettings = true;
-                showSelectionColorAdjustmentSettings = true;
-                showUVMesh = true;
-                exportFullTexture = false;
-                backgroundMode = 0;
-                customBackgroundColor = new Color(1f, 1f, 1f, 0f);
-                
-                // 色調補正サブタブの状態をリセット
-                showPaintedAreaColorAdjustment = true;
-                showReferenceColorAdjustment = false;
-                showCombinedColorAdjustment = false;
-                
-                // ドラッグ状態をクリア
-                isPainting = false;
-                isDraggingSymmetryAxis = false;
-                isDraggingUV = false;
-                isDrawingStraightLine = false;
-                hasLastPaintPosition = false;
-                isCurrentlyPainting = false;
-                
-                // ドラッグフラグをクリア
-                isDraggingGlobalHue = false;
-                isDraggingGlobalSaturation = false;
-                isDraggingGlobalBrightness = false;
-                isDraggingGlobalGamma = false;
-                isDraggingSelectionHue = false;
-                isDraggingSelectionSaturation = false;
-                isDraggingSelectionBrightness = false;
-                isDraggingSelectionGamma = false;
-                isDraggingPaintedAreaHue = false;
-                isDraggingPaintedAreaSaturation = false;
-                isDraggingPaintedAreaBrightness = false;
-                isDraggingPaintedAreaGamma = false;
-                isDraggingBrushSize = false;
-                isDraggingBrushStrength = false;
-                
-                // その他の状態フラグをリセット
-                needsColorUpdate = false;
-                needsGlobalUpdate = false;
-                needsPaintedAreaUpdate = false;
-                isProcessingGlobalColorAdjustment = false;
-                preventTextureRestore = false;
-                isPreviewActive = false;
-                needsMaterialRestore = false;
-                meshTextureDirty = true;
-                lastMeshCachedObject = null;
-                isSpoidMode = false;
-                isRestoringFromUndo = false;
-                ignoreSelectionChange = false;
-                ignoreSelectionChangeUntil = 0f;
-                lastShowButtonTime = 0f;
-                autoSetAfterApply = true;
-                
-                // Undoスタックをクリア
-                foreach (var undoRecord in undoStack)
-                {
-                    if (undoRecord.undoState != null)
+                    try
                     {
-                        undoRecord.undoState.Release();
+                        if (brushPainterCS.HasKernel("PaintBrush") && brushPainterCS.HasKernel("SelectionPaintOptimized"))
+                        {
+                            useGPUBrush = true;
+                            computeShaderVerified = true;
+                        }
+                    }
+                    catch (System.Exception)
+                    {
+                        useGPUBrush = false;
+                        computeShaderVerified = false;
                     }
                 }
-                undoStack.Clear();
                 
-                foreach (var redoRecord in redoStack)
-                {
-                    if (redoRecord.undoState != null)
-                    {
-                        redoRecord.undoState.Release();
-                    }
-                }
-                redoStack.Clear();
-                
-                // バックアップテクスチャをクリア
-                if (backupTexture != null)
-                {
-                    DestroyImmediate(backupTexture);
-                    backupTexture = null;
-                }
-                
-                if (persistentSelectionMask != null)
-                {
-                    DestroyImmediate(persistentSelectionMask);
-                    persistentSelectionMask = null;
-                }
-                
-                // エディターダーティフラグをクリア
-                EditorUtility.SetDirty(this);
-                
+                meshGeneratorCS = Resources.Load<ComputeShader>("MeshGenerator21");
+                colorAdjustmentCS = Resources.Load<ComputeShader>("ColorAdjustment21");
             }
             catch (System.Exception e)
             {
-                Debug.LogError($"Canvas Studio: ResetAllState エラー: {e.Message}");
+                Debug.LogError($"CanvasStudio: ComputeShader初期化エラー: {e.Message}");
+                useGPUBrush = false;
+                computeShaderVerified = false;
             }
         }
-
-        void CleanupAllResources()
+        
+        public void ResetAllState()
         {
-            RenderTexture.active = null;
-            CleanupTextures();
-            
-            if (brushCursorTexture != null) 
-            { 
-                try 
-                { 
-                    DestroyImmediate(brushCursorTexture); 
-                } 
-                catch (System.Exception) 
-                { 
-                } 
-                brushCursorTexture = null; 
-            }
-            
-            if (bucketCursorTexture != null) 
-            { 
-                try 
-                { 
-                    DestroyImmediate(bucketCursorTexture); 
-                } 
-                catch (System.Exception) 
-                { 
-                } 
-                bucketCursorTexture = null; 
-            }
-            
-            if (checkerboardTexture != null)
-            {
-                try 
-                { 
-                    DestroyImmediate(checkerboardTexture); 
-                } 
-                catch (System.Exception) 
-                { 
-                } 
-                checkerboardTexture = null;
-            }
-            
-            if (meshTexture != null) { meshTexture.Release(); meshTexture = null; }
-            
             targetObject = null;
             targetRenderer = null;
             targetMaterial = null;
@@ -499,41 +199,120 @@ namespace CanvasStudio
             originalTexture = null;
             directTexture = null;
             isDirectTextureMode = false;
+            materialIndex = 0;
             
-            selectionPenMode = false;
-            UpdateSelectionAreaStatus();
+            // 色調補正パラメータをリセット
+            colorHue = 0f;
+            colorSaturation = 1f;
+            colorBrightness = 1f;
+            colorGamma = 1f;
+            globalColorHue = 0f;
+            globalColorSaturation = 1f;
+            globalColorBrightness = 1f;
+            globalColorGamma = 1f;
+            paintedAreaColorHue = 0f;
+            paintedAreaColorSaturation = 1f;
+            paintedAreaColorBrightness = 1f;
+            paintedAreaColorGamma = 1f;
             
-            ResetColorAdjustmentParameters();
-            ResetGlobalColorAdjustmentParameters();
-            ResetPaintedAreaColorAdjustmentParameters();
+            // ペイント設定をリセット
+            paintColor = Color.red;
+            brushSize = 20f;
+            brushStrength = 1f;
+            paintOpacity = 1f;
+            eraseMode = false;
+            symmetricalPaint = false;
+            useBucketTool = false;
+            symmetryAxisPosition = 0.5f;
+            symmetryAxisLocked = true;
             
-            if (backupTexture != null)
-            {
-                DestroyImmediate(backupTexture);
-                backupTexture = null;
-            }
+            // UI状態をリセット
+            uvZoom = 1f;
+            uvPanOffset = Vector2.zero;
+            showPaintSettings = true;
+            showColorSettings = true;
+            showColorAdjustmentSettings = true;
+            showSelectionColorAdjustmentSettings = true;
+            showUVMesh = true;
+            exportFullTexture = false;
+            backgroundMode = 0;
+            customBackgroundColor = new Color(1f, 1f, 1f, 0f);
             
-            if (persistentSelectionMask != null)
-            {
-                DestroyImmediate(persistentSelectionMask);
-                persistentSelectionMask = null;
-            }
+            showPaintedAreaColorAdjustment = true;
+            showReferenceColorAdjustment = false;
+            showCombinedColorAdjustment = false;
+            
+            // フラグをリセット
+            isPainting = false;
+            isDraggingSymmetryAxis = false;
+            isDraggingUV = false;
+            isDrawingStraightLine = false;
+            hasLastPaintPosition = false;
+            isCurrentlyPainting = false;
+            preventTextureRestore = false;
+            isPreviewActive = false;
+            needsMaterialRestore = false;
+            meshTextureDirty = true;
+            lastMeshCachedObject = null;
+            isSpoidMode = false;
+            autoSetAfterApply = true;
+            
+            strokePaintedPixels.Clear();
         }
-
+        
+        public void CleanupAllResources()
+        {
+            RenderTexture.active = null;
+            CleanupTextures();
+            
+            if (brushCursorTexture != null) 
+            { 
+                try { Object.DestroyImmediate(brushCursorTexture); } 
+                catch (System.Exception) { } 
+                brushCursorTexture = null; 
+            }
+            
+            if (bucketCursorTexture != null) 
+            { 
+                try { Object.DestroyImmediate(bucketCursorTexture); } 
+                catch (System.Exception) { } 
+                bucketCursorTexture = null; 
+            }
+            
+            if (checkerboardTexture != null)
+            {
+                try { Object.DestroyImmediate(checkerboardTexture); } 
+                catch (System.Exception) { } 
+                checkerboardTexture = null;
+            }
+            
+            if (meshTexture != null) { meshTexture.Release(); meshTexture = null; }
+        }
+        
         void CleanupTextures()
         {
-            // RenderTexture.active を安全にリセット
             RenderTexture.active = null;
             
             if (workingTexture != null) { workingTexture.Release(); workingTexture = null; }
             if (paintMask != null) { paintMask.Release(); paintMask = null; }
             if (originalTextureRT != null) { originalTextureRT.Release(); originalTextureRT = null; }
             if (paintColorTexture != null) { paintColorTexture.Release(); paintColorTexture = null; }
-            if (selectionPreviewTexture != null) { selectionPreviewTexture.Release(); selectionPreviewTexture = null; }
-            if (colorAdjustedTexture != null) { colorAdjustedTexture.Release(); colorAdjustedTexture = null; }
-            if (normalModeTexture != null) { normalModeTexture.Release(); normalModeTexture = null; }
-            if (normalModeMask != null) { normalModeMask.Release(); normalModeMask = null; }
-            if (selectionMask != null) { selectionMask.Release(); selectionMask = null; }
+        }
+        
+        public RenderTexture CreateOptimizedRenderTexture(int width, int height, RenderTextureFormat format = RenderTextureFormat.ARGB32)
+        {
+            RenderTexture rt = new RenderTexture(width, height, 0, format);
+            rt.enableRandomWrite = true;
+            rt.Create();
+            
+            if (!SystemInfo.SupportsRenderTextureFormat(format))
+            {
+                Debug.LogWarning($"CanvasStudio: RenderTextureFormat {format} はサポートされていません");
+                rt.Release();
+                return null;
+            }
+            
+            return rt;
         }
     }
 }
